@@ -433,148 +433,114 @@ async function buildDedupHash(body) {
   return sha256Hex(JSON.stringify(normalized));
 }
 
+
+// Persistent subscriptions: source inputs stay private in KV, never in Git.
+function sourceUrl(value) {
+  const u = new URL(value);
+  if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error('源订阅 URL 无效');
+  const h = u.hostname.toLowerCase();
+  if (!h.includes('.') || h.includes(':') || /(^|\.)(localhost|local|internal)$/.test(h)) throw new Error('源订阅需要公网地址');
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {
+    const [a,b] = h.split('.').map(Number);
+    if (a===0 || a===10 || a===127 || a>=224 || (a===100 && b>=64 && b<=127) || (a===169 && b===254) || (a===172 && b>=16 && b<=31) || (a===192 && b===168) || (a===198 && (b===18 || b===19))) throw new Error('Cloudflare 无法读取内网源订阅');
+  }
+  return u;
+}
+async function readSource(value) {
+  let u = sourceUrl(value);
+  for (let attempt=0; attempt<4; attempt++) {
+    const response = await fetch(u.toString(), {redirect:'manual', signal:AbortSignal.timeout(12000), headers:{'User-Agent':'v2rayN/7.0','Accept':'text/plain'}});
+    if ([301,302,303,307,308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (!location) throw new Error('源订阅重定向无效');
+      u = sourceUrl(new URL(location,u).toString());
+      continue;
+    }
+    if (!response.ok) throw new Error('源订阅读取失败（HTTP '+response.status+'）');
+    if (Number(response.headers.get('content-length')||0)>2097152) throw new Error('源订阅超过 2 MB');
+    const reader = response.body.getReader();
+    const chunks=[]; let size=0;
+    while (true) { const {done,value}=await reader.read(); if(done) break; size+=value.length; if(size>2097152){await reader.cancel();throw new Error('源订阅超过 2 MB');} chunks.push(value); }
+    const bytes=new Uint8Array(size); let offset=0; for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+    return new TextDecoder().decode(bytes);
+  }
+  throw new Error('源订阅重定向过多');
+}
+async function resolveNodes(input) {
+  const lines=String(input||'').split(/\r?\n/).map(v=>v.trim()).filter(Boolean);
+  if(lines.length>200) throw new Error('最多输入 200 行');
+  const urls=lines.filter(v=>/^https?:\/\//i.test(v));
+  if(urls.length>5) throw new Error('最多输入 5 个源订阅');
+  const nodes=[];
+  for(const line of lines) {
+    const content=/^https?:\/\//i.test(line) ? await readSource(line) : line;
+    nodes.push(...parseRawLinks(content));
+  }
+  const eligible=nodes.filter(n=>n.network==='ws' && n.tls && n.host && n.sni);
+  const unique=[...new Map(eligible.map(n=>[JSON.stringify(n),n])).values()];
+  if(!unique.length) throw new Error('没有识别到可优选的 WS + TLS 节点；请使用原始/Base64订阅，保留 Host/SNI');
+  return {nodes:unique, skipped:nodes.length-eligible.length};
+}
+function accessAllowed(provided,env) {
+  return Boolean(env.SUB_ACCESS_TOKEN && provided && provided===env.SUB_ACCESS_TOKEN);
+}
 async function handleGenerate(request, env, url) {
-  let body;
+  if(!env.SUB_STORE) return json({ok:false,error:'请绑定 SUB_STORE KV'},503);
+  if(!env.SUB_ACCESS_TOKEN) return json({ok:false,error:'请先在 Cloudflare 设置 SUB_ACCESS_TOKEN Secret'},503);
+  let body; try {body=await request.json();} catch {return json({ok:false,error:'请求体不是合法 JSON'},400);}
+  if(!accessAllowed(body.accessToken,env)) return json({ok:false,error:'访问令牌错误'},403);
   try {
-    body = await request.json();
-  } catch {
-    return json({ ok: false, error: '请求体不是合法 JSON' }, 400);
-  }
-
-  const baseNodes = parseRawLinks(body.nodeLinks || '');
-  const preferredEndpoints = parsePreferredEndpoints(body.preferredIps || '');
-
-  if (!baseNodes.length) return json({ ok: false, error: '没有识别到可用节点' }, 400);
-  if (!preferredEndpoints.length) return json({ ok: false, error: '没有识别到可用优选地址' }, 400);
-
-  const options = {
-    namePrefix: body.namePrefix || '',
-    keepOriginalHost: body.keepOriginalHost !== false,
-  };
-
-  const nodes = buildNodes(baseNodes, preferredEndpoints, options);
-
-  const payload = {
-    version: 1,
-    createdAt: new Date().toISOString(),
-    options,
-    nodes,
-  };
-
-  const dedupHash = await buildDedupHash(body);
-  const dedupKey = `dedup:${dedupHash}`;
-
-  let id = await env.SUB_STORE.get(dedupKey);
-
-  if (!id) {
-    id = await createUniqueShortId(env);
-    const ttl = 60 * 60 * 24 * 7; // 7天
-
-    await env.SUB_STORE.put(`sub:${id}`, JSON.stringify(payload), {
-      expirationTtl: ttl,
-    });
-
-    await env.SUB_STORE.put(dedupKey, id, {
-      expirationTtl: ttl,
-    });
-  }
-
-  const origin = url.origin;
-  const accessToken = env.SUB_ACCESS_TOKEN || '';
-  const withToken = (target) =>
-    `${origin}/sub/${id}${
-      target
-        ? `?target=${target}&token=${encodeURIComponent(accessToken)}`
-        : `?token=${encodeURIComponent(accessToken)}`
-    }`;
-
-  return json({
-    ok: true,
-    storage: 'kv',
-    deduplicated: true,
-    shortId: id,
-    urls: {
-      auto: withToken(''),
-      raw: withToken('raw'),
-      clash: withToken('clash'),
-      surge: withToken('surge'),
-    },
-    counts: {
-      inputNodes: baseNodes.length,
-      preferredEndpoints: preferredEndpoints.length,
-      outputNodes: nodes.length,
-    },
-    preview: nodes.slice(0, 20).map((node) => ({
-      name: node.name,
-      type: node.type,
-      server: node.server,
-      port: node.port,
-      host: node.host || '',
-      sni: node.sni || '',
-    })),
-    warnings: accessToken ? [] : ['未检测到 SUB_ACCESS_TOKEN，订阅链接将没有第二层访问保护。'],
-  });
+    const nodeLinks=String(body.nodeLinks||'').trim();
+    const preferredIps=String(body.preferredIps||'').trim();
+    if(nodeLinks.length>2097152 || preferredIps.length>20000) throw new Error('输入过大');
+    const resolved=await resolveNodes(nodeLinks);
+    const preferredEndpoints=parsePreferredEndpoints(preferredIps);
+    if(!preferredEndpoints.length || preferredEndpoints.length>50) throw new Error('请填写 1 至 50 个优选地址');
+    for(const ep of preferredEndpoints) {
+      if(!/^[a-zA-Z0-9.-]+$/.test(ep.server) || (ep.port && ![443,2053,2083,2087,2096,8443].includes(ep.port))) throw new Error('优选地址格式错误，端口需为 Cloudflare HTTPS 代理端口');
+    }
+    if(resolved.nodes.length*preferredEndpoints.length>500) throw new Error('生成节点数量最多 500');
+    const options={namePrefix:String(body.namePrefix||'CF').slice(0,100),keepOriginalHost:true};
+    const normalized={nodeLinks,preferredIps,...options};
+    const hash=await sha256Hex(JSON.stringify(normalized));
+    const dedupKey='persistent:'+hash;
+    let id=await env.SUB_STORE.get(dedupKey);
+    if(id && !(await env.SUB_STORE.get('sub:'+id))) id=null;
+    if(!id) {
+      id=createShortId(32);
+      await env.SUB_STORE.put('sub:'+id,JSON.stringify({version:2,createdAt:new Date().toISOString(),nodeLinks,preferredIps,options}));
+      await env.SUB_STORE.put(dedupKey,id);
+    }
+    const nodes=buildNodes(resolved.nodes,preferredEndpoints,options);
+    const makeUrl=target=>url.origin+'/sub/'+id+'?target='+target+'&token='+encodeURIComponent(body.accessToken);
+    return json({ok:true,storage:'kv',shortId:id,urls:{auto:makeUrl('raw'),raw:makeUrl('raw'),clash:makeUrl('clash')},counts:{inputNodes:resolved.nodes.length,preferredEndpoints:preferredEndpoints.length,outputNodes:nodes.length},preview:nodes.slice(0,50).map(n=>({name:n.name,server:n.server,port:n.port,host:n.host,sni:n.sni})),warnings:resolved.skipped?['已跳过 '+resolved.skipped+' 个非 WS + TLS 节点']:[],persistent:true});
+  } catch { return json({ok:false,error:'源订阅读取或解析失败。请确认公网可访问、内容为原始/Base64节点，且优选地址使用 CF HTTPS 端口。'},400); }
 }
-
-function validateAccessToken(url, env) {
-  const expected = env.SUB_ACCESS_TOKEN;
-  if (!expected) return { ok: true };
-  const provided = url.searchParams.get('token') || '';
-  if (!provided || provided !== expected) {
-    return { ok: false, response: text('Forbidden: invalid token', 403) };
-  }
-  return { ok: true };
+async function handleSub(url,env) {
+  if(!accessAllowed(url.searchParams.get('token'),env)) return text('Forbidden',403);
+  const id=url.pathname.split('/').pop();
+  if(!id) return text('missing id',400);
+  const raw=await env.SUB_STORE.get('sub:'+id);
+  if(!raw) return text('not found',404);
+  try {
+    const record=JSON.parse(raw);
+    const nodes=record.version===2 ? buildNodes((await resolveNodes(record.nodeLinks)).nodes,parsePreferredEndpoints(record.preferredIps),record.options) : record.nodes;
+    const target=(url.searchParams.get('target')||'raw').toLowerCase();
+    let response;
+    if(target==='clash') response=text(renderClash(nodes),200,'text/yaml; charset=utf-8');
+    else if(target==='raw') response=text(renderRaw(nodes));
+    else return text('supported targets: raw, clash',400);
+    response.headers.set('cache-control','private, no-store');
+    response.headers.set('referrer-policy','no-referrer');
+    response.headers.set('profile-update-interval','6');
+    return response;
+  } catch { return text('源订阅读取失败，请稍后更新订阅',502); }
 }
-
-async function handleSub(url, env) {
-  const tokenCheck = validateAccessToken(url, env);
-  if (!tokenCheck.ok) return tokenCheck.response;
-
-  const id = url.pathname.split('/').pop();
-  if (!id) return text('missing id', 400);
-
-  const raw = await env.SUB_STORE.get(`sub:${id}`);
-  if (!raw) return text('not found', 404);
-
-  const record = JSON.parse(raw);
-  const nodes = record.nodes || [];
-  const target = (url.searchParams.get('target') || 'raw').toLowerCase();
-
-  if (target === 'clash') {
-    return text(renderClash(nodes), 200, 'text/yaml; charset=utf-8');
-  }
-  if (target === 'surge') {
-    return text(
-      renderSurge(nodes, url.origin + url.pathname, env.SUB_ACCESS_TOKEN || ''),
-      200,
-      'text/plain; charset=utf-8',
-    );
-  }
-  return text(renderRaw(nodes), 200, 'text/plain; charset=utf-8');
-}
-
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'access-control-allow-origin': '*',
-          'access-control-allow-methods': 'GET,POST,OPTIONS',
-          'access-control-allow-headers': 'content-type',
-        },
-      });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/generate') {
-      return handleGenerate(request, env, url);
-    }
-
-    if (request.method === 'GET' && url.pathname.startsWith('/sub/')) {
-      return handleSub(url, env);
-    }
-
+  async fetch(request,env) {
+    const url=new URL(request.url);
+    if(request.method==='POST' && url.pathname==='/api/generate') return handleGenerate(request,env,url);
+    if(request.method==='GET' && url.pathname.startsWith('/sub/')) return handleSub(url,env);
     return env.ASSETS.fetch(request);
-  },
+  }
 };
