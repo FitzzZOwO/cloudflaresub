@@ -514,7 +514,7 @@ async function handleGenerate(request, env, url) {
     const nodes=buildNodes(resolved.nodes,preferredEndpoints,options);
     const makeUrl=target=>url.origin+'/sub/'+id+'?target='+target+'&token='+encodeURIComponent(body.accessToken);
     return json({ok:true,storage:'kv',shortId:id,urls:{auto:makeUrl('raw'),raw:makeUrl('raw'),clash:makeUrl('clash')},counts:{inputNodes:resolved.nodes.length,preferredEndpoints:preferredEndpoints.length,outputNodes:nodes.length},preview:nodes.slice(0,50).map(n=>({name:n.name,server:n.server,port:n.port,host:n.host,sni:n.sni})),warnings:resolved.skipped?['已跳过 '+resolved.skipped+' 个非 WS + TLS 节点']:[],persistent:true});
-  } catch { return json({ok:false,error:'源订阅读取或解析失败。请确认公网可访问、内容为原始/Base64节点，且优选地址使用 CF HTTPS 端口。'},400); }
+  } catch (error) { const msg = String(error?.message || '未知错误'); const known = /^(源订阅|没有识别到|最多输入|请填写|优选地址|生成节点|Cloudflare 无法|输入过大)/.test(msg); return json({ok:false,error:known ? msg : '源订阅读取或处理失败：' + String(error?.name || 'Error')},400); }
 }
 async function handleSub(url,env) {
   if(!accessAllowed(url.searchParams.get('token'),env)) return text('Forbidden',403);
