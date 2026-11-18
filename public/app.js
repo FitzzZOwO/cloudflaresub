@@ -39,6 +39,7 @@ form.addEventListener('submit', async (event) => {
   previewBody.innerHTML = '';
 
   const payload = {
+    accessToken: new URLSearchParams(location.hash.slice(1)).get('token') || '',
     nodeLinks: document.getElementById('nodeLinks').value,
     preferredIps: document.getElementById('preferredIps').value,
     namePrefix: document.getElementById('namePrefix').value,
