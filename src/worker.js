@@ -456,7 +456,7 @@ async function readSource(value) {
       u = sourceUrl(new URL(location,u).toString());
       continue;
     }
-    if (!response.ok) throw new Error('源订阅读取失败（HTTP '+response.status+'）');
+    if (!response.ok) { const body = await response.text(); const kind = response.headers.get('cf-mitigated') === 'challenge' ? 'Cloudflare 验证' : /error code: 1010/i.test(body) ? 'Cloudflare 1010' : /error code: 1020/i.test(body) ? 'Cloudflare 1020' : /cloudflare/i.test(body) ? 'Cloudflare 返回' : '源服务返回'; throw new Error('源订阅读取失败（HTTP '+response.status+'，'+kind+'）'); }
     if (Number(response.headers.get('content-length')||0)>2097152) throw new Error('源订阅超过 2 MB');
     const reader = response.body.getReader();
     const chunks=[]; let size=0;
