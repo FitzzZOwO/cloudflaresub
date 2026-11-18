@@ -2,7 +2,6 @@
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>CloudflareSub · 长期优选订阅</title><link rel="icon" href="/icons/auto.svg"><link rel="stylesheet" href="/styles.css"><style>main{max-width:1100px;margin:32px auto;padding:20px}label{display:block;margin:16px 0 8px}textarea,input{width:100%;box-sizing:border-box}section{margin-bottom:20px}#result:empty{display:none}.result-link{display:block;overflow-wrap:anywhere;margin:12px 0}pre{white-space:pre-wrap}table{width:100%}</style></head>
 <body><main><section class="hero card"><div><p class="eyebrow">CloudflareSub · 基于 InfiCheesy/cloudflaresub</p><h1>长期 CF 优选订阅</h1><p class="lead">源订阅自动更新，保留 Host / SNI，生成多入口节点。</p></div></section>
 <section class="card"><form id="form">
-<label for="accessToken">访问令牌</label><input id="accessToken" type="password" autocomplete="off" placeholder="填写 Cloudflare 中的 SUB_ACCESS_TOKEN" required>
 <label for="nodeLinks">源订阅 URL / 节点链接</label><textarea id="nodeLinks" rows="6" placeholder="公网可访问的原始/Base64订阅 URL，一行一个；也可粘贴 vless://、vmess://、trojan:// 或 Base64 内容。" required></textarea><p class="hint">更新订阅时重新读取源 URL，只扩展 WS + TLS 节点；自动跳过 Reality 等其他协议。</p>
 <label for="preferredIps">优选 IP / 域名</label><textarea id="preferredIps" rows="6" placeholder="cm.cf.090227.xyz:2053#移动优选&#10;104.16.1.2:2053#CF候选" required></textarea><p class="hint">一行一个，格式为 地址[:端口][#备注]。本服务负责扩展节点，速度由客户端测试；可填写测速得到的地址。</p>
 <label for="namePrefix">节点备注前缀</label><input id="namePrefix" value="CF"><p class="hint">Host / SNI 始终保留。订阅长期保存在专用 KV；链接含访问令牌，请妥善保管。</p><button id="generate" type="submit">生成长期订阅</button></form></section>
@@ -12,7 +11,9 @@ const byId=id=>document.getElementById(id);
 byId('form').addEventListener('submit',async event=>{
  event.preventDefault();const result=byId('result');result.replaceChildren();const button=byId('generate');button.disabled=true;button.textContent='正在读取源订阅…';
  try {
-  const body={accessToken:byId('accessToken').value,nodeLinks:byId('nodeLinks').value,preferredIps:byId('preferredIps').value,namePrefix:byId('namePrefix').value};
+  const accessToken=new URLSearchParams(location.hash.slice(1)).get('token');
+  if(!accessToken)throw new Error('请使用带访问令牌的管理链接打开页面');
+  const body={accessToken,nodeLinks:byId('nodeLinks').value,preferredIps:byId('preferredIps').value,namePrefix:byId('namePrefix').value};
   const response=await fetch('/api/generate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   const data=await response.json();if(!response.ok || !data.ok)throw new Error(data.error||'生成失败');
   const heading=document.createElement('h2');heading.textContent='长期订阅已生成';result.append(heading);
