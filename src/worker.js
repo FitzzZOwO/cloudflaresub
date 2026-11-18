@@ -500,7 +500,7 @@ async function handleGenerate(request, env, url) {
       if(!/^[a-zA-Z0-9.-]+$/.test(ep.server) || (ep.port && ![443,2053,2083,2087,2096,8443].includes(ep.port))) throw new Error('优选地址格式错误，端口需为 Cloudflare HTTPS 代理端口');
     }
     if(resolved.nodes.length*preferredEndpoints.length>500) throw new Error('生成节点数量最多 500');
-    const options={namePrefix:String(body.namePrefix||'CF').slice(0,100),keepOriginalHost:true};
+    const options={namePrefix:String(body.namePrefix||'').slice(0,100),keepOriginalHost:body.keepOriginalHost!==false};
     const normalized={nodeLinks,preferredIps,...options};
     const hash=await sha256Hex(JSON.stringify(normalized));
     const dedupKey='persistent:'+hash;
@@ -513,7 +513,7 @@ async function handleGenerate(request, env, url) {
     }
     const nodes=buildNodes(resolved.nodes,preferredEndpoints,options);
     const makeUrl=target=>url.origin+'/sub/'+id+'?target='+target+'&token='+encodeURIComponent(body.accessToken);
-    return json({ok:true,storage:'kv',shortId:id,urls:{auto:makeUrl('raw'),raw:makeUrl('raw'),clash:makeUrl('clash')},counts:{inputNodes:resolved.nodes.length,preferredEndpoints:preferredEndpoints.length,outputNodes:nodes.length},preview:nodes.slice(0,50).map(n=>({name:n.name,server:n.server,port:n.port,host:n.host,sni:n.sni})),warnings:resolved.skipped?['已跳过 '+resolved.skipped+' 个非 WS + TLS 节点']:[],persistent:true});
+    return json({ok:true,storage:'kv',shortId:id,urls:{auto:makeUrl('raw'),raw:makeUrl('raw'),clash:makeUrl('clash'),surge:makeUrl('surge')},counts:{inputNodes:resolved.nodes.length,preferredEndpoints:preferredEndpoints.length,outputNodes:nodes.length},preview:nodes.slice(0,50).map(n=>({name:n.name,server:n.server,port:n.port,host:n.host,sni:n.sni,type:n.type})),warnings:resolved.skipped?['已跳过 '+resolved.skipped+' 个非 WS + TLS 节点']:[],persistent:true});
   } catch (error) { const msg = String(error?.message || '未知错误'); const known = /^(源订阅|没有识别到|最多输入|请填写|优选地址|生成节点|Cloudflare 无法|输入过大)/.test(msg); return json({ok:false,error:known ? msg : '源订阅读取或处理失败：' + String(error?.name || 'Error')},400); }
 }
 async function handleSub(url,env) {
@@ -528,6 +528,7 @@ async function handleSub(url,env) {
     const target=(url.searchParams.get('target')||'raw').toLowerCase();
     let response;
     if(target==='clash') response=text(renderClash(nodes),200,'text/yaml; charset=utf-8');
+    else if(target==='surge') response=text(renderSurge(nodes,url.origin+url.pathname,url.searchParams.get('token')));
     else if(target==='raw') response=text(renderRaw(nodes));
     else return text('supported targets: raw, clash',400);
     response.headers.set('cache-control','private, no-store');
